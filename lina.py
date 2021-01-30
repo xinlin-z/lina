@@ -61,8 +61,8 @@ def cprint(*objects, sep=' ', end='\n', file=sys.stdout,
 
 def _print(url, stat):
     print(url, stat)
-    cprint(' Links:%d,Workers:%d'
-           % (len(link_stat),threading.active_count()-1), end='\r',
+    cprint(' Workers:%d, Links:%d'
+           % (threading.active_count()-1, len(link_stat)), end='\r',
            fg='g', style='inverse')
 
 
