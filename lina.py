@@ -109,8 +109,8 @@ def main():
                         help='how many worker thread')
     args = parser.parse_args()
     # create thread pool
-    tpool = eval('cuf.ThreadPoolExecutor() if args.worker is None'
-                 ' else cuf.ThreadPoolExecutor(max_workers=args.worker)')
+    tpool = (cuf.ThreadPoolExecutor() if args.worker is None
+             else cuf.ThreadPoolExecutor(max_workers=args.worker))
     # put init url in queue
     q.put(args.url)
     # get from queue and submit
