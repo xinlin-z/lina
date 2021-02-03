@@ -14,6 +14,7 @@ GET2SUBMIT_TIMEOUT = 10
 
 
 q = queue.Queue()
+link_num = 0
 mutex = threading.Lock()
 
 
@@ -58,17 +59,6 @@ def cprint(*objects, sep=' ', end='\n', file=sys.stdout,
     print(_ct(color)+string+_ct(), sep=sep, end=end, file=file, flush=flush)
 
 
-def _print(url, stat):
-    if stat == 200:
-        print(url, stat, 'OK')
-    else:
-        print(url, end=' ')
-        cprint(stat, fg='m')
-    cprint(' Workers:%d, Links:%d'
-           % (threading.active_count()-1, len(link_stat)), end='\r',
-           fg='g', style='inverse')
-
-
 # This function is running concurrently.
 def check_url(url, start_url, single, dbfile):
     with mutex:
@@ -94,8 +84,9 @@ def check_url(url, start_url, single, dbfile):
     except Exception as e:
         status = repr(e)
     finally:
-        _print(url, status)
         with mutex:
+            global link_num
+            link_num += 1
             try:
                 conn = sqlite3.connect(dbfile)
                 conn.execute('UPDATE link_data SET status=? where link=?',
@@ -106,6 +97,15 @@ def check_url(url, start_url, single, dbfile):
                 return
             finally:
                 conn.close()
+        # show out
+        if status == 200:
+            print(url, status, 'OK')
+        else:
+            print(url, end=' ')
+            cprint(status, fg='m')
+        cprint(' Workers:%d, Links:%d'
+               % (threading.active_count()-1, link_num), end='\r',
+               fg='g', style='inverse')
     # only links with same domain prefix need to parse
     if re.match(start_url, url):
         parse_flag = True
@@ -113,7 +113,8 @@ def check_url(url, start_url, single, dbfile):
             if url != start_url: parse_flag = False
         if parse_flag:
             html = res.read().decode()
-            urlset = set(re.findall(r'href="([^#].*?)"', html))
+            # here we decide what kind of links to process
+            urlset = set(re.findall(r'href="([^#]*?)"', html))
             with mutex:
                 try:
                     conn = sqlite3.connect(dbfile)
@@ -131,7 +132,8 @@ def check_url(url, start_url, single, dbfile):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('url', help='start url with http[s] prefix')
+    parser.add_argument('-u', '--url', required=True,
+                        help='start url with http[s] prefix')
     parser.add_argument('-d', '--database', required=True,
                         help='name a sqlite database to store data')
     parser.add_argument('-s', '--single', action='store_true',
@@ -155,8 +157,14 @@ def main():
     # create thread pool
     tpool = (cuf.ThreadPoolExecutor() if args.worker is None
              else cuf.ThreadPoolExecutor(max_workers=args.worker))
-    # put init url in queue
+    # put init urls in queue
     q.put(args.url)
+    conn = sqlite3.connect(args.database)
+    r = conn.execute('SELECT link FROM link_data WHERE status!=200')
+    for row in r.fetchall():
+        conn.execute('DELETE FROM link_data WHERE link=?', (row[0],))
+        q.put(row[0])
+    conn.commit()
     # loop, get from queue and submit
     while True:
         try:
@@ -167,7 +175,7 @@ def main():
             print('GET2SUBMIT timeout, submit done...')
             break
         tpool.submit(check_url, url, args.url, args.single, args.database)
-    # show result in single mode
+    cprint('Total Links: %d'%link_num, fg='g')
 
 
 if __name__ == '__main__':
