@@ -14,8 +14,6 @@ GET2SUBMIT_TIMEOUT = 10
 
 
 q = queue.Queue()
-link_data = {}
-link_stat = {}
 mutex = threading.Lock()
 
 
@@ -131,18 +129,6 @@ def check_url(url, start_url, single, dbfile):
                 q.put(it)
 
 
-
-init_sql = """
-BEGIN EXCLUSIVE;
-CREATE TABLE IF NOT EXISTS link_data (
-    link_id INTEGER PRIMARY KEY,
-    link TEXT UNIQUE,
-    status TEXT,
-    sub_links TEXT);
-COMMIT;
-"""
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('url', help='start url with http[s] prefix')
@@ -154,6 +140,15 @@ def main():
                         help='how many worker thread')
     args = parser.parse_args()
     # init database
+    init_sql = """
+    BEGIN EXCLUSIVE;
+    CREATE TABLE IF NOT EXISTS link_data (
+        link_id INTEGER PRIMARY KEY,
+        link TEXT UNIQUE,
+        status TEXT,
+        sub_links TEXT);
+    COMMIT;
+    """
     conn = sqlite3.connect(args.database)
     conn.executescript(init_sql)
     conn.close()
