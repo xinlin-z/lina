@@ -6,6 +6,7 @@ import queue
 import urllib.request
 import concurrent.futures as cuf
 import threading
+import sqlite3
 
 
 REQUEST_TIMEOUT = 3
@@ -60,7 +61,11 @@ def cprint(*objects, sep=' ', end='\n', file=sys.stdout,
 
 
 def _print(url, stat):
-    print(url, stat)
+    if stat == 200:
+        print(url, stat, 'OK')
+    else:
+        print(url, end=' ')
+        cprint(stat, fg='m')
     cprint(' Workers:%d, Links:%d'
            % (threading.active_count()-1, len(link_stat)), end='\r',
            fg='g', style='inverse')
