@@ -9,7 +9,7 @@ import threading
 import sqlite3
 
 
-REQUEST_TIMEOUT = 3
+REQUEST_TIMEOUT = 5
 GET2SUBMIT_TIMEOUT = 10
 
 
@@ -175,7 +175,14 @@ def main():
             print('GET2SUBMIT timeout, submit done...')
             break
         tpool.submit(check_url, url, args.url, args.single, args.database)
-    cprint('Total Links: %d'%link_num, fg='g')
+    # stat data in database
+    cprint('Stat in %s:' % args.database, fg='g', style='inverse')
+    conn = sqlite3.connect(args.database)
+    r = conn.execute('SELECT count(*) FROM link_data WHERE status==200')
+    cprint('status==200, links:', r.fetchone()[0], fg='g')
+    r = conn.execute('SELECT count(*) FROM link_data WHERE status!=200')
+    cprint('status!=200, links:', r.fetchone()[0], fg='m')
+    conn.close()
 
 
 if __name__ == '__main__':
