@@ -71,54 +71,98 @@ def _print(url, stat):
            fg='g', style='inverse')
 
 
-def parse_link(url, res):
-    html = res.read().decode()
-    urlset = set(re.findall(r'href="([^#].*?)"', html))
-    link_data[url] = urlset
-    for it in urlset:
-        with mutex:
-            if it in link_stat.keys():
-                continue
-        q.put(it)
-
-
-def check_url(url, start_url, single):
+# This function is running concurrently.
+def check_url(url, start_url, single, dbfile):
     with mutex:
-        if url in link_stat.keys():
+        try:
+            conn = sqlite3.connect(dbfile)
+            r = conn.execute('SELECT status FROM link_data WHERE link=?',
+                                                                    (url,))
+            if r.fetchone() is None:
+                conn.execute('INSERT INTO link_data VALUES (?,?,?,?)',
+                                                        (None,url,-1,None))
+                conn.commit()
+            else:
+                return
+        except Exception as e:
+            print('Exception 1:', repr(e))
             return
-        else:  # make the key occupied by this thread
-            link_stat[url] = None
+        finally:
+            conn.close()
+    #
     try:
         res = urllib.request.urlopen(url, timeout=REQUEST_TIMEOUT)
+        status = res.status
     except Exception as e:
-        link_stat[url] = repr(e)
-        _print(url, link_stat[url])
-        return
-    link_stat[url] = res.status
-    _print(url, res.status)
-    # only links with same domain need to parse
+        status = repr(e)
+    finally:
+        _print(url, status)
+        with mutex:
+            try:
+                conn = sqlite3.connect(dbfile)
+                conn.execute('UPDATE link_data SET status=? where link=?',
+                             (status, url))
+                conn.commit()
+            except Exception as e:
+                print('Exception 2:', repr(e))
+                return
+            finally:
+                conn.close()
+    # only links with same domain prefix need to parse
     if re.match(start_url, url):
+        parse_flag = True
         if single:
-            if url == start_url:
-                parse_link(url, res)
-        else:
-            parse_link(url, res)
+            if url != start_url: parse_flag = False
+        if parse_flag:
+            html = res.read().decode()
+            urlset = set(re.findall(r'href="([^#].*?)"', html))
+            with mutex:
+                try:
+                    conn = sqlite3.connect(dbfile)
+                    conn.execute(
+                        'UPDATE link_data SET sub_links=? where link=?',
+                        (str(urlset), url))
+                    conn.commit()
+                except Exception as e:
+                    print('Exception 3:', repr(e))
+                finally:
+                    conn.close()
+            for it in urlset:
+                q.put(it)
+
+
+
+init_sql = """
+BEGIN EXCLUSIVE;
+CREATE TABLE IF NOT EXISTS link_data (
+    link_id INTEGER PRIMARY KEY,
+    link TEXT UNIQUE,
+    status TEXT,
+    sub_links TEXT);
+COMMIT;
+"""
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('url', help='start url with http[s] prefix')
+    parser.add_argument('-d', '--database', required=True,
+                        help='name a sqlite database to store data')
     parser.add_argument('-s', '--single', action='store_true',
                         help='single page mode')
     parser.add_argument('-w', '--worker', type=int,
                         help='how many worker thread')
     args = parser.parse_args()
+    # init database
+    conn = sqlite3.connect(args.database)
+    conn.executescript(init_sql)
+    conn.close()
     # create thread pool
     tpool = (cuf.ThreadPoolExecutor() if args.worker is None
              else cuf.ThreadPoolExecutor(max_workers=args.worker))
     # put init url in queue
     q.put(args.url)
-    # get from queue and submit
+    # loop, get from queue and submit
     while True:
         try:
             url = q.get(timeout=GET2SUBMIT_TIMEOUT)
@@ -127,21 +171,8 @@ def main():
             tpool.shutdown()
             print('GET2SUBMIT timeout, submit done...')
             break
-        tpool.submit(check_url, url, args.url, args.single)
-    # save result
-    with open(fn:='lina_'+str(time.time())+'.txt', 'w') as f:
-        for k,v in link_data.items():
-            err_list = []
-            for link in v:
-                try:
-                    if link_stat[link] != 200:
-                        err_list.append((link, link_stat[link]))
-                except:
-                    err_list.append((link, None))
-            f.write(f'{k}, {link_stat[k]}\n')
-            for it in err_list:
-                f.write(f'    {str(it)}\n')
-    print('save result to %s done...' % fn)
+        tpool.submit(check_url, url, args.url, args.single, args.database)
+    # show result in single mode
 
 
 if __name__ == '__main__':
