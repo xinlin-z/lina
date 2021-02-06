@@ -89,7 +89,7 @@ def http_head(url, ua=None, timeout=3):
 
 
 # This function is running concurrently.
-def check_url(url, start_url, single, dbfile):
+def check_url(url, start_url, single, dbfile, relaxtime):
     # Unknown error had been observed, and thread will terminated silently.
     # So here use another try except structure to catch any uncatched error.
     try:
@@ -182,6 +182,8 @@ def check_url(url, start_url, single, dbfile):
             with open('error.txt', 'a') as f:
                 f.write(repr(e))
                 f.write('\n')
+    finally:
+        if relaxtime: time.sleep(relaxtime)
 
 
 def main():
@@ -194,6 +196,9 @@ def main():
                         help='single page mode')
     parser.add_argument('-w', '--worker', type=int,
                         help='how many worker thread')
+    parser.add_argument(
+        '-t', '--relaxtime', type=int,
+        help='relax N seconds just before return of each worker')
     args = parser.parse_args()
     # init database
     init_sql = """
@@ -214,12 +219,15 @@ def main():
     # put init urls in queue
     q.put(args.url)
     conn = sqlite3.connect(args.database)
+    conn.execute('DELETE FROM link_data WHERE link=?', (args.url,))
+    conn.commit()
     r = conn.execute('SELECT link FROM link_data WHERE status!=200')
     for row in r.fetchall():
         conn.execute('DELETE FROM link_data WHERE link=?', (row[0],))
         q.put(row[0])
         print('# add %s to queue from %s' % (row[0], args.database))
     conn.commit()
+    conn.close()
     # loop, get from queue and submit
     while True:
         try:
@@ -229,7 +237,12 @@ def main():
             tpool.shutdown()
             print('GET2SUBMIT timeout, submit done...')
             break
-        tpool.submit(check_url, url, args.url, args.single, args.database)
+        tpool.submit(check_url,
+                     url,
+                     args.url,
+                     args.single,
+                     args.database,
+                     args.relaxtime)
     # stat data in database
     cprint('Stat in database %s:' % args.database, fg='g')
     conn = sqlite3.connect(args.database)
