@@ -90,8 +90,8 @@ def http_head(url, ua=None, timeout=3):
 
 # This function is running concurrently.
 def check_url(url, start_url, single, dbfile):
-    # Unknown error has been observed, and thread will terminated silently.
-    # So, here use another try except structure to catch any uncatched error.
+    # Unknown error had been observed, and thread will terminated silently.
+    # So here use another try except structure to catch any uncatched error.
     try:
         with mutex:
             try:
@@ -111,9 +111,15 @@ def check_url(url, start_url, single, dbfile):
                 conn.close()
         #
         try:
-            status, bcont = http_get(url, timeout=REQUEST_TIMEOUT)
+            if re.search(r'(.jpg|.jpeg|.png|.gif|.webp|.css|.js|.txt|.xml)$',
+                         url.lower()):
+                status = http_head(url, timeout=REQUEST_TIMEOUT)
+                bcont = None
+            else:
+                status, bcont = http_get(url, timeout=REQUEST_TIMEOUT)
         except Exception as e:
             status = str(e)
+            bcont = None
         finally:
             with mutex:
                 global link_num
@@ -135,8 +141,8 @@ def check_url(url, start_url, single, dbfile):
                 print(url, end=' ')
                 cprint(status, end=' ', fg='m')
                 try:
-                    cprint(http.server.BaseHTTPRequestHandler.responses[status],
-                           end=' ', fg='m')
+                  cprint(http.server.BaseHTTPRequestHandler.responses[status],
+                         end=' ', fg='m')
                 except KeyError:
                     ...
                 finally:
@@ -145,14 +151,19 @@ def check_url(url, start_url, single, dbfile):
                    % (threading.active_count()-1,link_num),end='\r',flush=True,
                    fg='g', style='inverse')
         # only links with same domain prefix need to parse
-        if status==200 and re.match(start_url, url):
+        if status==200 and bcont and re.match(start_url, url):
             parse_flag = True
             if single:
                 if url != start_url: parse_flag = False
             if parse_flag:
+                bcont = bcont.decode()
                 # here we decide what kind of links to process
-                # 1. all href="link" except anchor links (contain #)
-                urlset = set(re.findall(r'href="([^#]*?)"', bcont.decode()))
+                # 1. href="link"
+                urlset1 = set(re.findall(r'href="(http.*?[^#]*?)"', bcont))
+                # 2. src="link"
+                urlset2 = set(re.findall(r'img.*?src="(http.*?)"', bcont))
+                # merge to one set
+                urlset = urlset1 | urlset2
                 with mutex:
                     try:
                         conn = sqlite3.connect(dbfile)
