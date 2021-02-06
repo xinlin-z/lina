@@ -89,10 +89,17 @@ def http_head(url, ua=None, timeout=3):
 
 
 # This function is running concurrently.
-def check_url(url, start_url, single, dbfile, relaxtime):
+def check_url(url, start_url, single, dbfile, relaxtime, exclude):
     # Unknown error had been observed, and thread will terminated silently.
     # So here use another try except structure to catch any uncatched error.
     try:
+        # do exclude
+        if exclude:
+            if re.search(exclude, url):
+                print(url, end=' ')
+                cprint('skipped', fg='y')
+                return
+        #
         with mutex:
             try:
                 conn = sqlite3.connect(dbfile)
@@ -111,7 +118,7 @@ def check_url(url, start_url, single, dbfile, relaxtime):
                 conn.close()
         #
         try:
-            if re.search(r'(.jpg|.jpeg|.png|.gif|.webp|.css|.js|.txt|.xml)$',
+            if re.search(r'[.](jpg|jpeg|png|gif|webp|css|js|txt|xml)$',
                          url.lower()):
                 status = http_head(url, timeout=REQUEST_TIMEOUT)
                 bcont = None
@@ -199,6 +206,9 @@ def main():
     parser.add_argument(
         '-t', '--relaxtime', type=int,
         help='relax N seconds just before return of each worker')
+    parser.add_argument(
+        '-e', '--exclude',
+        help='exclude urls which hit the re pattern')
     args = parser.parse_args()
     # init database
     init_sql = """
@@ -242,7 +252,8 @@ def main():
                      args.url,
                      args.single,
                      args.database,
-                     args.relaxtime)
+                     args.relaxtime,
+                     args.exclude)
     # stat data in database
     cprint('Stat in database %s:' % args.database, fg='g')
     conn = sqlite3.connect(args.database)
