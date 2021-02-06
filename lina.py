@@ -7,6 +7,7 @@ import urllib.request
 import concurrent.futures as cuf
 import threading
 import sqlite3
+import http.server
 
 
 REQUEST_TIMEOUT = 5
@@ -59,75 +60,117 @@ def cprint(*objects, sep=' ', end='\n', file=sys.stdout,
     print(_ct(color)+string+_ct(), sep=sep, end=end, file=file, flush=flush)
 
 
+def http_get(url, ua=None, timeout=3):
+    """HTTP GET method for an url, return (status,content) or raise."""
+    try:
+        req = (urllib.request.Request(url,headers={'User-Agent':ua}) if ua
+               else urllib.request.Request(url))
+        with urllib.request.urlopen(req,timeout=timeout) as res:
+            return res.status, res.read()
+    except urllib.error.HTTPError as e:
+        return e.code, None
+    except Exception:
+        raise
+
+
+def http_head(url, ua=None, timeout=3):
+    """HTTP HEAD method for an url, return status code or raise."""
+    try:
+        req = (urllib.request.Request(url,
+                                      headers={'User-Agent':ua},
+                                      method='HEAD') if ua else
+               urllib.request.Request(url,method='HEAD'))
+        with urllib.request.urlopen(req,timeout=timeout) as res:
+            return res.status
+    except urllib.error.HTTPError as e:
+        return e.code
+    except Exception:
+        raise
+
+
 # This function is running concurrently.
 def check_url(url, start_url, single, dbfile):
-    with mutex:
-        try:
-            conn = sqlite3.connect(dbfile)
-            r = conn.execute('SELECT status FROM link_data WHERE link=?',
-                                                                    (url,))
-            if r.fetchone() is None:
-                conn.execute('INSERT INTO link_data VALUES (?,?,?,?)',
-                                                        (None,url,-1,None))
-                conn.commit()
-            else:
-                return
-        except Exception as e:
-            print('Exception 1:', repr(e))
-            return
-        finally:
-            conn.close()
-    #
+    # Unknown error has been observed, and thread will terminated silently.
+    # So, here use another try except structure to catch any uncatched error.
     try:
-        res = urllib.request.urlopen(url, timeout=REQUEST_TIMEOUT)
-        status = res.status
-    except Exception as e:
-        status = repr(e)
-    finally:
         with mutex:
-            global link_num
-            link_num += 1
             try:
                 conn = sqlite3.connect(dbfile)
-                conn.execute('UPDATE link_data SET status=? where link=?',
-                             (status, url))
-                conn.commit()
+                r = conn.execute('SELECT status FROM link_data WHERE link=?',
+                                                                        (url,))
+                if r.fetchone() is None:
+                    conn.execute('INSERT INTO link_data VALUES (?,?,?,?)',
+                                                            (None,url,-1,None))
+                    conn.commit()
+                else:
+                    return
             except Exception as e:
-                print('Exception 2:', repr(e))
+                print('Exception 1:', repr(e))
                 return
             finally:
                 conn.close()
-        # show out
-        if status == 200:
-            print(url, status, 'OK')
-        else:
-            print(url, end=' ')
-            cprint(status, fg='m')
-        cprint(' Workers:%d, Links:%d'
-               % (threading.active_count()-1, link_num), end='\r',
-               fg='g', style='inverse')
-    # only links with same domain prefix need to parse
-    if re.match(start_url, url):
-        parse_flag = True
-        if single:
-            if url != start_url: parse_flag = False
-        if parse_flag:
-            html = res.read().decode()
-            # here we decide what kind of links to process
-            urlset = set(re.findall(r'href="([^#]*?)"', html))
+        #
+        try:
+            status, bcont = http_get(url, timeout=REQUEST_TIMEOUT)
+        except Exception as e:
+            status = str(e)
+        finally:
             with mutex:
+                global link_num
+                link_num += 1
                 try:
                     conn = sqlite3.connect(dbfile)
-                    conn.execute(
-                        'UPDATE link_data SET sub_links=? where link=?',
-                        (str(urlset), url))
+                    conn.execute('UPDATE link_data SET status=? where link=?',
+                                 (status, url))
                     conn.commit()
                 except Exception as e:
-                    print('Exception 3:', repr(e))
+                    print('Exception 2:', repr(e))
+                    return
                 finally:
                     conn.close()
-            for it in urlset:
-                q.put(it)
+            # show out
+            if status == 200:
+                print(url, status, 'OK')
+            else:
+                print(url, end=' ')
+                cprint(status, end=' ', fg='m')
+                try:
+                    cprint(http.server.BaseHTTPRequestHandler.responses[status],
+                           end=' ', fg='m')
+                except KeyError:
+                    ...
+                finally:
+                    print()
+            cprint(' Workers:%d, Links:%d'
+                   % (threading.active_count()-1,link_num),end='\r',flush=True,
+                   fg='g', style='inverse')
+        # only links with same domain prefix need to parse
+        if status==200 and re.match(start_url, url):
+            parse_flag = True
+            if single:
+                if url != start_url: parse_flag = False
+            if parse_flag:
+                # here we decide what kind of links to process
+                # 1. all href="link" except anchor links (contain #)
+                urlset = set(re.findall(r'href="([^#]*?)"', bcont.decode()))
+                with mutex:
+                    try:
+                        conn = sqlite3.connect(dbfile)
+                        conn.execute(
+                            'UPDATE link_data SET sub_links=? where link=?',
+                            (str(urlset), url))
+                        conn.commit()
+                    except Exception as e:
+                        print('Exception 3:', repr(e))
+                    finally:
+                        conn.close()
+                for it in urlset:
+                    q.put(it)
+    except Exception as e:
+        with mutex:
+            with open('error.txt', 'a') as f:
+                f.write(repr(e))
+                f.write('\n')
 
 
 def main():
@@ -164,6 +207,7 @@ def main():
     for row in r.fetchall():
         conn.execute('DELETE FROM link_data WHERE link=?', (row[0],))
         q.put(row[0])
+        print('# add %s to queue from %s' % (row[0], args.database))
     conn.commit()
     # loop, get from queue and submit
     while True:
@@ -176,12 +220,13 @@ def main():
             break
         tpool.submit(check_url, url, args.url, args.single, args.database)
     # stat data in database
-    cprint('Stat in %s:' % args.database, fg='g', style='inverse')
+    cprint('Stat in database %s:' % args.database, fg='g')
     conn = sqlite3.connect(args.database)
-    r = conn.execute('SELECT count(*) FROM link_data WHERE status==200')
-    cprint('status==200, links:', r.fetchone()[0], fg='g')
-    r = conn.execute('SELECT count(*) FROM link_data WHERE status!=200')
-    cprint('status!=200, links:', r.fetchone()[0], fg='m')
+    r = conn.execute('SELECT status,count(status) FROM link_data'
+                     ' GROUP BY status')
+    print('status code : link number')
+    for row in r.fetchall():
+        print((str(row[0])+':').ljust(16,' '), row[1])
     conn.close()
 
 
