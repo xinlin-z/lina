@@ -19,6 +19,10 @@ link_num = 0
 mutex = threading.Lock()
 
 
+link_stat = {}
+link_stat_mutex = threading.Lock()
+
+
 def cprint(*objects, sep=' ', end='\n', file=sys.stdout,
            flush=False, fg=None, bg=None, style='default'):
     """colorful print.
@@ -206,9 +210,8 @@ def main():
     parser.add_argument(
         '-t', '--relaxtime', type=int,
         help='relax N seconds just before return of each worker')
-    parser.add_argument(
-        '-e', '--exclude',
-        help='exclude urls which hit the re pattern')
+    parser.add_argument('-e', '--exclude',
+                        help='exclude urls which hit the re pattern')
     args = parser.parse_args()
     # init database
     init_sql = """
@@ -229,13 +232,26 @@ def main():
     # put init urls in queue
     q.put(args.url)
     conn = sqlite3.connect(args.database)
-    conn.execute('DELETE FROM link_data WHERE link=?', (args.url,))
-    conn.commit()
-    r = conn.execute('SELECT link FROM link_data WHERE status!=200')
+    r = conn.execute('SELECT link,status FROM link_data')
     for row in r.fetchall():
-        conn.execute('DELETE FROM link_data WHERE link=?', (row[0],))
-        q.put(row[0])
-        print('# add %s to queue from %s' % (row[0], args.database))
+        if row[1] == -1:
+            q.put(row[0])
+            print('# add %s' % (row[0],))
+    r = conn.execute('DELETE FROM link_data WHERE status==-1')
+    conn.commit()
+    r = conn.execute('SELECT link,sub_links FROM link_data')
+    for row in r.fetchall():
+        if row[1] is None:
+            q.put(row[0])
+            print('# add %s' % (row[0],))
+        else:
+            for link in eval(row[1]):
+                s = conn.execute('SELECT status FROM link_data WHERE link=?',
+                                 (link,))
+                if s.fetchone() is None:
+                    q.put(link)
+                    print('# add %s' % (link,))
+    r = conn.execute('DELETE FROM link_data WHERE sub_links==null')
     conn.commit()
     conn.close()
     # loop, get from queue and submit
