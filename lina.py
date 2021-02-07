@@ -17,13 +17,8 @@ GET2SUBMIT_TIMEOUT = 10
 q = queue.Queue()
 link_num = 0
 db_mutex = threading.Lock()
-
-
-link_stat = {}
-link_stat_mutex = threading.Lock()
-
-
 show_mutex = threading.Lock()
+fe_mutex = threading.Lock()
 
 
 def cprint(*objects, sep=' ', end='\n', file=sys.stdout,
@@ -95,6 +90,10 @@ def http_head(url, ua=None, timeout=3):
         raise
 
 
+head_suffix = re.compile(
+    r'[.](jpg|jpeg|png|gif|webp|css|js|txt|xml|gzip|rar|7z)$')
+
+
 # This function is running concurrently!
 def check_url(url, start_url, single, dbfile, relaxtime, exclude):
     # Unknown error had been observed, and thread will terminated silently.
@@ -102,12 +101,11 @@ def check_url(url, start_url, single, dbfile, relaxtime, exclude):
     try:
         # determine url type
         url_type = 0  # normal html page
-        if re.search(r'[.](jpg|jpeg|png|gif|webp|css|js|txt|xml)$',
-                     url.lower()):
+        if head_suffix.search(url.lower()):
             url_type = 1  # resource page
         # do exclude
         if exclude:
-            if re.search(exclude, url):
+            if exclude.search(url):
                 with show_mutex:
                     print(url, end=' ')
                     cprint('skipped', fg='y')
@@ -183,8 +181,11 @@ def check_url(url, start_url, single, dbfile, relaxtime, exclude):
                 urlset1 = set(re.findall(r'href="(http.*?[^#]*?)"', bcont))
                 # 2. src="link"
                 urlset2 = set(re.findall(r'img.*?src="(http.*?)"', bcont))
-                # merge to one set
+                # merge to one set and remove excludes
                 urlset = urlset1 | urlset2
+                for it in list(urlset):
+                    if exclude.search(it):
+                        urlset.remove(it)
                 with db_mutex:
                     try:
                         conn = sqlite3.connect(dbfile)
@@ -198,9 +199,9 @@ def check_url(url, start_url, single, dbfile, relaxtime, exclude):
                         conn.close()
                 # put sub links in queue
                 for it in urlset:
-                    q.put(it)
+                    q.put(it.strip())
     except Exception as e:
-        with db_mutex:
+        with fe_mutex:
             with open('error.txt', 'a') as f:
                 f.write(repr(e))
                 f.write('\n')
@@ -210,8 +211,11 @@ def check_url(url, start_url, single, dbfile, relaxtime, exclude):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('-u', '--url', required=True,
-                        help='start url with http[s] prefix')
+    actType = parser.add_mutually_exclusive_group(required=True)
+    actType.add_argument('-u', '--url',
+                         help='start url with http[s] prefix')
+    actType.add_argument('--stat', action='store_true',
+                         help='show stat for a database')
     parser.add_argument('-d', '--database', required=True,
                         help='name a sqlite database to store data')
     parser.add_argument('-s', '--single', action='store_true',
@@ -224,69 +228,79 @@ def main():
     parser.add_argument('-e', '--exclude',
                         help='exclude urls which hit the re pattern')
     args = parser.parse_args()
-    # init database
-    init_sql = """
-    BEGIN EXCLUSIVE;
-    CREATE TABLE IF NOT EXISTS link_data (
-        link_id INTEGER PRIMARY KEY,
-        link TEXT UNIQUE,
-        type INT,
-        status TEXT,
-        sub_links TEXT);
-    COMMIT;
-    """
-    conn = sqlite3.connect(args.database)
-    conn.executescript(init_sql)
-    conn.close()
-    # put incompleted urls in queue
-    q.put(args.url)
-    conn = sqlite3.connect(args.database)
-    # (1) link status is not 200
-    r = conn.execute('SELECT link FROM link_data WHERE status!=200')
-    for row in r.fetchall():
-        q.put(row[0])
-        print('# add %s' % (row[0],))
-    r = conn.execute('DELETE FROM link_data WHERE status!=200')
-    conn.commit()
-    # (2) sub_links is null
-    r = conn.execute(
-        'SELECT link FROM link_data WHERE type==0 and sub_links is null')
-    for row in r.fetchall():
-        q.put(row[0])
-        print('# add %s' % (row[0],))
-    r = conn.execute(
-        'DELETE FROM link_data WHERE type==0 and sub_links is null')
-    conn.commit()
-    # (3) links in sub_links which are not stored
-    r = conn.execute(
-        'SELECT sub_links FROM link_data WHERE sub_links is not null')
-    for row in r.fetchall():
-        for link in eval(row[0]):
-            s = conn.execute('SELECT status FROM link_data WHERE link=?',
-                             (link,))
-            if s.fetchone() is None:
-                q.put(link)
-                print('# add %s' % (link,))
-    conn.close()
-    # create thread pool
-    tpool = (cuf.ThreadPoolExecutor() if args.worker is None
-             else cuf.ThreadPoolExecutor(max_workers=args.worker))
-    # loop, get from queue and submit
-    while True:
-        try:
-            url = q.get(timeout=GET2SUBMIT_TIMEOUT)
-        except queue.Empty:
-            # wait all futures to stop and free resources
-            tpool.shutdown()
-            print('GET2SUBMIT timeout, submit done...')
-            break
-        tpool.submit(check_url,
-                     url,
-                     args.url,
-                     args.single,
-                     args.database,
-                     args.relaxtime,
-                     args.exclude)
+    if not args.stat:
+        # init database
+        init_sql = """
+        BEGIN EXCLUSIVE;
+        CREATE TABLE IF NOT EXISTS link_data (
+            link_id INTEGER PRIMARY KEY,
+            link TEXT UNIQUE,
+            type INT,
+            status TEXT,
+            sub_links TEXT);
+        COMMIT;
+        """
+        conn = sqlite3.connect(args.database)
+        conn.executescript(init_sql)
+        conn.close()
+        # put incompleted urls in queue
+        qlist = []
+        qlist.append(args.url.strip())
+        conn = sqlite3.connect(args.database)
+        # (1) link status is not 200
+        r = conn.execute('SELECT link FROM link_data WHERE status!=200')
+        for row in r.fetchall():
+            qlist.append(row[0])
+        r = conn.execute('DELETE FROM link_data WHERE status!=200')
+        conn.commit()
+        # (2) sub_links is null
+        r = conn.execute(
+            'SELECT link FROM link_data WHERE type==0 and sub_links is null')
+        for row in r.fetchall():
+            qlist.append(row[0])
+        r = conn.execute(
+            'DELETE FROM link_data WHERE type==0 and sub_links is null')
+        conn.commit()
+        # (3) links in sub_links which are not stored
+        r = conn.execute(
+            'SELECT sub_links FROM link_data WHERE sub_links is not null')
+        for row in r.fetchall():
+            for link in eval(row[0]):
+                link = link.strip()
+                s = conn.execute('SELECT status FROM link_data WHERE link=?',
+                                 (link,))
+                if s.fetchone() is None:
+                    qlist.append(link)
+        conn.close()
+        for it in set(qlist):
+            q.put(it)
+            print('# add %s' % it)
+        # loop, get from queue and submit
+        j = 0
+        while True:
+            # create thread pool for each 1000 jobs
+            if 'tpool' not in locals():
+                tpool = (cuf.ThreadPoolExecutor() if args.worker is None
+                         else cuf.ThreadPoolExecutor(max_workers=args.worker))
+            try:
+                url = q.get(timeout=GET2SUBMIT_TIMEOUT)
+            except queue.Empty:
+                # wait all futures to stop and free resources
+                tpool.shutdown()
+                print('GET2SUBMIT timeout, submit done...')
+                break
+            tpool.submit(check_url,
+                         url,
+                         args.url,
+                         args.single,
+                         args.database,
+                         args.relaxtime,
+                         re.compile(args.exclude) if args.exclude else None)
+            j += 1
+            if j > 512:
+                tpool.shutdown()
+                del tpool
+                j = 0
     # stat data in database
     cprint('Stat in database %s:' % args.database, fg='g')
     conn = sqlite3.connect(args.database)
