@@ -99,17 +99,6 @@ def check_url(url, start_url, single, dbfile, relaxtime, exclude):
     # Unknown error had been observed, and thread will terminated silently.
     # So here use another try except structure to catch any uncatched error.
     try:
-        # determine url type
-        url_type = 0  # normal html page
-        if head_suffix.search(url.lower()):
-            url_type = 1  # resource page
-        # do exclude
-        if exclude:
-            if exclude.search(url):
-                with show_mutex:
-                    print(url, end=' ')
-                    cprint('skipped', fg='y')
-                    return
         #
         with db_mutex:
             try:
@@ -117,6 +106,10 @@ def check_url(url, start_url, single, dbfile, relaxtime, exclude):
                 r = conn.execute('SELECT status FROM link_data WHERE link=?',
                                  (url,))
                 if r.fetchone() is None:
+                    # determine url type
+                    url_type = 0  # normal html page
+                    if head_suffix.search(url.lower()):
+                        url_type = 1  # resource page
                     conn.execute('INSERT INTO link_data VALUES (?,?,?,?,?)',
                                  (None,url,url_type,-1,None))
                     conn.commit()
@@ -173,7 +166,8 @@ def check_url(url, start_url, single, dbfile, relaxtime, exclude):
         if status==200 and bcont and re.match(start_url, url):
             parse_flag = True
             if single:
-                if url != start_url: parse_flag = False
+                if url != start_url:
+                    parse_flag = False
             if parse_flag:
                 bcont = bcont.decode()
                 # here we decide what kind of links to process
@@ -184,8 +178,9 @@ def check_url(url, start_url, single, dbfile, relaxtime, exclude):
                 # merge to one set and remove excludes
                 urlset = urlset1 | urlset2
                 for it in list(urlset):
-                    if exclude.search(it):
-                        urlset.remove(it)
+                    if exclude:
+                        if exclude.search(it):
+                            urlset.remove(it)
                 with db_mutex:
                     try:
                         conn = sqlite3.connect(dbfile)
@@ -197,9 +192,20 @@ def check_url(url, start_url, single, dbfile, relaxtime, exclude):
                         print('Exception 3:', repr(e))
                     finally:
                         conn.close()
-                # put sub links in queue
-                for it in urlset:
-                    q.put(it.strip())
+                # put sub links which are not checked to queue
+                with db_mutex:
+                    try:
+                        conn = sqlite3.connect(dbfile)
+                        for it in map(str.strip, urlset):
+                            r = conn.execute(
+                                'SELECT link FROM link_data WHERE link=?',
+                                (it,))
+                            if r.fetchone() is None:
+                                q.put(it)
+                    except Exception as e:
+                        print('Exception 4:', repr(e))
+                    finally:
+                        conn.close()
     except Exception as e:
         with fe_mutex:
             with open('error.txt', 'a') as f:
@@ -212,8 +218,7 @@ def check_url(url, start_url, single, dbfile, relaxtime, exclude):
 def main():
     parser = argparse.ArgumentParser()
     actType = parser.add_mutually_exclusive_group(required=True)
-    actType.add_argument('-u', '--url',
-                         help='start url with http[s] prefix')
+    actType.add_argument('--url',  help='start url with http[s] prefix')
     actType.add_argument('--stat', action='store_true',
                          help='show stat for a database')
     parser.add_argument('-d', '--database', required=True,
@@ -224,7 +229,7 @@ def main():
                         help='how many worker thread')
     parser.add_argument(
         '-t', '--relaxtime', type=int,
-        help='relax N seconds just before return of each worker')
+        help='relax N microseconds just before return of each worker')
     parser.add_argument('-e', '--exclude',
                         help='exclude urls which hit the re pattern')
     args = parser.parse_args()
@@ -275,13 +280,11 @@ def main():
         for it in set(qlist):
             q.put(it)
             print('# add %s' % it)
+        # create thread pool
+        tpool = (cuf.ThreadPoolExecutor() if args.worker is None
+                 else cuf.ThreadPoolExecutor(max_workers=args.worker))
         # loop, get from queue and submit
-        j = 0
         while True:
-            # create thread pool for each 1000 jobs
-            if 'tpool' not in locals():
-                tpool = (cuf.ThreadPoolExecutor() if args.worker is None
-                         else cuf.ThreadPoolExecutor(max_workers=args.worker))
             try:
                 url = q.get(timeout=GET2SUBMIT_TIMEOUT)
             except queue.Empty:
@@ -294,13 +297,8 @@ def main():
                          args.url,
                          args.single,
                          args.database,
-                         args.relaxtime,
+                         args.relaxtime/1000,
                          re.compile(args.exclude) if args.exclude else None)
-            j += 1
-            if j > 512:
-                tpool.shutdown()
-                del tpool
-                j = 0
     # stat data in database
     cprint('Stat in database %s:' % args.database, fg='g')
     conn = sqlite3.connect(args.database)
