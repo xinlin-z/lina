@@ -225,6 +225,7 @@ def main():
     actType.add_argument('--url',  help='start url with http[s] prefix')
     actType.add_argument('--stat', action='store_true',
                          help='show stat for a database')
+    actType.add_argument('--showpage', help='show info for a single page')
     parser.add_argument('-d', '--database', required=True,
                         help='name a sqlite database to store data')
     parser.add_argument('-s', '--single', action='store_true',
@@ -237,6 +238,34 @@ def main():
     parser.add_argument('-e', '--exclude',
                         help='exclude urls which hit the re pattern')
     args = parser.parse_args()
+    # showpage cmd
+    if args.showpage:
+        try:
+            conn = sqlite3.connect(args.database)
+            r = conn.execute(
+                'SELECT link,status,sub_links FROM link_data WHERE link=?',
+                (args.showpage,))
+            row = r.fetchone()
+            if row is None:
+                print('link %s is not in %s database.'
+                      %(args.showpage, args.database))
+                return
+            if row[1] != '200':
+                print('link %s is not 200, no furthur info.' % args.showpage)
+                return
+            else:
+                print('link %s is 200, sub_links:' % args.showpage)
+                for it in eval(row[2] if row[2] else '[]'):
+                    r = conn.execute(
+                        'SELECT status FROM link_data WHERE link=?',(it,))
+                    row = r.fetchone()
+                    print(it, row[0] if row else None)
+        except Exception as e:
+            print(repr(e))
+        finally:
+            conn.close()
+        return
+    # url cmd
     if not args.stat:
         # init database
         init_sql = """
