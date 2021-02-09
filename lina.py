@@ -2,23 +2,26 @@ import sys
 import argparse
 import time
 import re
-import queue
 import urllib.request
 import concurrent.futures as cuf
 import threading
 import sqlite3
 from http.server import BaseHTTPRequestHandler as HTTP
+import random
 
 
 REQUEST_TIMEOUT = 5
 GET2SUBMIT_TIMEOUT = 10
 
 
-q = queue.Queue()
 link_num = 0
 db_mutex = threading.Lock()
 show_mutex = threading.Lock()
 fe_mutex = threading.Lock()
+
+
+listq = []
+listq_mutex = threading.Lock()
 
 
 def cprint(*objects, sep=' ', end='\n', file=sys.stdout,
@@ -96,30 +99,30 @@ head_suffix = re.compile(
 
 # This function is running concurrently!
 def check_url(url, start_url, single, dbfile, relaxtime, exclude):
+    with db_mutex:
+        try:
+            conn = sqlite3.connect(dbfile)
+            r = conn.execute('SELECT status FROM link_data WHERE link=?',
+                             (url,))
+            if r.fetchone() is None:
+                # determine url type
+                url_type = 0  # normal html page
+                if head_suffix.search(url.lower()):
+                    url_type = 1  # resource page
+                conn.execute('INSERT INTO link_data VALUES (?,?,?,?,?)',
+                             (None,url,url_type,-1,None))
+                conn.commit()
+            else:
+                print('..@..')
+                return  # fast return without sleep
+        except Exception as e:
+            print('Exception 1:', repr(e))
+            return
+        finally:
+            conn.close()
     # Unknown error had been observed, and thread will terminated silently.
     # So here use another try except structure to catch any uncatched error.
     try:
-        #
-        with db_mutex:
-            try:
-                conn = sqlite3.connect(dbfile)
-                r = conn.execute('SELECT status FROM link_data WHERE link=?',
-                                 (url,))
-                if r.fetchone() is None:
-                    # determine url type
-                    url_type = 0  # normal html page
-                    if head_suffix.search(url.lower()):
-                        url_type = 1  # resource page
-                    conn.execute('INSERT INTO link_data VALUES (?,?,?,?,?)',
-                                 (None,url,url_type,-1,None))
-                    conn.commit()
-                else:
-                    return
-            except Exception as e:
-                print('Exception 1:', repr(e))
-                return
-            finally:
-                conn.close()
         #
         try:
             if url_type == 1:
@@ -201,7 +204,9 @@ def check_url(url, start_url, single, dbfile, relaxtime, exclude):
                                 'SELECT link FROM link_data WHERE link=?',
                                 (it,))
                             if r.fetchone() is None:
-                                q.put(it)
+                                with listq_mutex:
+                                    if it not in listq:
+                                        listq.append(it)
                     except Exception as e:
                         print('Exception 4:', repr(e))
                     finally:
@@ -278,27 +283,36 @@ def main():
                     qlist.append(link)
         conn.close()
         for it in set(qlist):
-            q.put(it)
+            listq.append(it)
             print('# add %s' % it)
         # create thread pool
         tpool = (cuf.ThreadPoolExecutor() if args.worker is None
                  else cuf.ThreadPoolExecutor(max_workers=args.worker))
         # loop, get from queue and submit
+        j = 0
         while True:
             try:
-                url = q.get(timeout=GET2SUBMIT_TIMEOUT)
-            except queue.Empty:
-                # wait all futures to stop and free resources
-                tpool.shutdown()
-                print('GET2SUBMIT timeout, submit done...')
-                break
-            tpool.submit(check_url,
-                         url,
-                         args.url,
-                         args.single,
-                         args.database,
-                         args.relaxtime/1000,
-                         re.compile(args.exclude) if args.exclude else None)
+                with listq_mutex:
+                    url = listq[0]
+                    tpool.submit(
+                        check_url,
+                        url,
+                        args.url,
+                        args.single,
+                        args.database,
+                        args.relaxtime/1000 if args.relaxtime else None,
+                        re.compile(args.exclude) if args.exclude else None)
+                    listq.pop(0)
+                j = 0
+            except IndexError:
+                j += 1
+                if j == GET2SUBMIT_TIMEOUT:
+                    # wait all futures to stop and free resources
+                    tpool.shutdown()
+                    print('GET2SUBMIT timeout, submit done...')
+                    break
+                time.sleep(1)
+                continue
     # stat data in database
     cprint('Stat in database %s:' % args.database, fg='g')
     conn = sqlite3.connect(args.database)
