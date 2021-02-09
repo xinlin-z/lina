@@ -113,7 +113,6 @@ def check_url(url, start_url, single, dbfile, relaxtime, exclude):
                              (None,url,url_type,-1,None))
                 conn.commit()
             else:
-                print('..@..')
                 return  # fast return without sleep
         except Exception as e:
             print('Exception 1:', repr(e))
@@ -255,7 +254,8 @@ def main():
         conn.close()
         # put incompleted urls in queue
         qlist = []
-        qlist.append(args.url.strip())
+        url = args.url.strip()
+        qlist.append(url)
         conn = sqlite3.connect(args.database)
         # (1) link status is not 200
         r = conn.execute('SELECT link FROM link_data WHERE status!=200')
@@ -267,10 +267,8 @@ def main():
         r = conn.execute(
             'SELECT link FROM link_data WHERE type==0 and sub_links is null')
         for row in r.fetchall():
-            qlist.append(row[0])
-        r = conn.execute(
-            'DELETE FROM link_data WHERE type==0 and sub_links is null')
-        conn.commit()
+            if re.match(url, row[0]):
+                qlist.append(row[0])
         # (3) links in sub_links which are not stored
         r = conn.execute(
             'SELECT sub_links FROM link_data WHERE sub_links is not null')
